@@ -12,7 +12,7 @@
 #include "/include/global.glsl"
 
 layout (location = 0) out vec4 clouds;
-layout (location = 1) out float apparent_distance;
+layout (location = 1) out vec2 clouds_data;
 
 /* RENDERTARGETS: 9,10 */
 
@@ -34,8 +34,11 @@ flat in CloudsParameters clouds_params;
 //   Uniforms
 // ------------
 
-uniform sampler3D colortex6; // 3D worley noise
-uniform sampler3D colortex7; // 3D curl noise
+uniform sampler3D colortex6; // 3D bubbly worley noise
+#define SAMPLER_WORLEY_BUBBLY colortex6
+uniform sampler3D colortex7; // 3D swirley worley noise
+#define SAMPLER_WORLEY_SWIRLEY colortex7
+
 uniform sampler2D colortex8; // cloud shadow map
 
 uniform sampler3D depthtex0; // atmospheric scattering LUT
@@ -180,12 +183,14 @@ void main() {
 		dither
 	);
 
-	clouds.xyz        = result.scattering;
-	clouds.w          = result.transmittance;
-	apparent_distance = result.apparent_distance * rcp(CLOUDS_SCALE);
+	clouds.xyz    = result.scattering.xyz;
+	clouds.w      = result.transmittance;
+	clouds_data.x = result.apparent_distance * rcp(CLOUDS_SCALE);
+	clouds_data.y = result.scattering.w;
 #else
-	clouds            = vec4(0.0, 0.0, 0.0, 1.0);
-	apparent_distance = 1e6;
+	clouds        = vec4(0.0, 0.0, 0.0, 1.0);
+	clouds_data.x = 1e6;
+	clouds_data.y = 0.0;
 #endif
 
 	// Crepuscular rays 

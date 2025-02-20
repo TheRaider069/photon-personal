@@ -52,8 +52,6 @@ uniform sampler2D colortex4; // sky map
 uniform sampler2D colortex5; // previous frame color
 uniform sampler2D colortex6; // ambient lighting data
 uniform sampler2D colortex7; // previous frame fog scattering
-uniform sampler2D colortex11; // clouds history
-uniform sampler2D colortex12; // clouds apparent distance
 uniform sampler2D colortex14; // ambient lighting history data
 
 #ifndef USE_SEPARATE_ENTITY_DRAWS
@@ -147,7 +145,6 @@ uniform float eye_skylight;
 
 /*
 const bool colortex5MipmapEnabled = true;
-const bool colortex11MipmapEnabled = true;
 */
 
 // ------------
@@ -180,20 +177,6 @@ const bool colortex11MipmapEnabled = true;
 #include "/include/lighting/cloud_shadows.glsl"
 #endif
 
-vec4 read_clouds_and_aurora(out float apparent_distance) {
-#if defined WORLD_OVERWORLD
-	// Soften clouds for new pixels
-	float pixel_age = texelFetch(colortex12, ivec2(gl_FragCoord.xy), 0).y;
-	float ld = 2.0 * dampen(max0(1.0 - 0.1 * pixel_age));
-
-	apparent_distance = min_of(textureGather(colortex12, uv * taau_render_scale, 0));
-
-	return textureLod(colortex11, uv * taau_render_scale, ld);
-#else
-	return vec4(0.0, 0.0, 0.0, 1.0);
-#endif
-}
-
 void main() {
 #if !defined USE_SEPARATE_ENTITY_DRAWS
 	colortex3_clear = vec4(0.0);
@@ -211,9 +194,6 @@ void main() {
 #if !defined USE_SEPARATE_ENTITY_DRAWS
 	vec4 overlays       = texelFetch(colortex3, texel, 0);
 #endif
-
-	float clouds_distance;
-	vec4 clouds_and_aurora = read_clouds_and_aurora(clouds_distance);
 
     // Check for Distant Horizons terrain
 
@@ -284,9 +264,6 @@ void main() {
 #else
 		scene_color = draw_sky(world_dir);
 #endif
-
-		// Apply clouds and aurora
-		scene_color = scene_color * clouds_and_aurora.w + clouds_and_aurora.xyz;
 
 		// Apply blocky clouds 
 #if defined WORLD_OVERWORLD && defined BLOCKY_CLOUDS 
@@ -387,9 +364,6 @@ void main() {
 
 		// Upscale ambient occlusion
 
-		float ao, ambient_sss;
-		vec3 bent_normal;
-
 		float lin_z = screen_to_view_space_depth(combined_projection_matrix_inverse, depth);
 
 		#define depth_weight(reversed_depth) exp2(-10.0 * abs(screen_to_view_space_depth(combined_projection_matrix_inverse, 1.0 - reversed_depth) - lin_z))
@@ -399,35 +373,28 @@ void main() {
 		float w11 = depth_weight(ambient_depth_11) * (f.x * f.y);
 		#undef depth_weight
 
+		vec4 ambient_upscaled;
 		float weight_sum = w00 + w10 + w01 + w11;
 
 		if (weight_sum != 0.0) {
-			float rcp_weight_sum = rcp(weight_sum);
+			ambient_upscaled 
+				= ambient_00 * w00 
+				+ ambient_10 * w10 
+				+ ambient_01 * w01 
+				+ ambient_11 * w11;
 
-			ao = ambient_00.x * w00
-				+ ambient_10.x * w10 
-				+ ambient_01.x * w01 
-				+ ambient_11.x * w11;
-			ao *= rcp_weight_sum;
-
-			ambient_sss = ambient_00.y * w00
-				+ ambient_10.y * w10 
-				+ ambient_01.y * w01 
-				+ ambient_11.y * w11;
-			ambient_sss *= rcp_weight_sum;
-
-			bent_normal = decode_unit_vector(ambient_00.zw) * w00
-				+ decode_unit_vector(ambient_10.zw) * w10 
-				+ decode_unit_vector(ambient_01.zw) * w01 
-				+ decode_unit_vector(ambient_11.zw) * w11;
-			// re-normalize
-			float len_sq = length_squared(bent_normal);
-			bent_normal = (len_sq == 0.0) ? flat_normal : bent_normal * inversesqrt(len_sq);
+			ambient_upscaled *= rcp(weight_sum);
 		} else {
-			ao = ambient_00.x;
-			ambient_sss = ambient_00.y;
-			bent_normal = decode_unit_vector(ambient_00.zw);
+			ambient_upscaled = ambient_00;
 		}
+
+		float ao = ambient_upscaled.x;
+		float ambient_sss = ambient_upscaled.y;
+
+		vec3 bent_normal;
+		bent_normal.xy = ambient_upscaled.zw * 2.0 - 1.0;
+		bent_normal.z = sqrt(clamp01(1.0 - dot(bent_normal.xy, bent_normal.xy)));
+		bent_normal = mat3(gbufferModelViewInverse) * bent_normal;
 
 		// Shadows
 
@@ -546,15 +513,8 @@ void main() {
 		vec4 fog = common_fog(view_distance, false);
 		scene_color = scene_color * fog.a + fog.rgb;
 
-		// Apply clouds in front of terrain
-#if defined WORLD_OVERWORLD
-	#ifndef BLOCKY_CLOUDS
-		if (clouds_distance < view_distance) {
-			scene_color = scene_color * clouds_and_aurora.w + clouds_and_aurora.xyz;
-		}
-	#else
+#if defined WORLD_OVERWORLD && defined BLOCKY_CLOUDS
 		scene_color = scene_color * blocky_clouds.w + blocky_clouds.xyz;
-	#endif
 #endif
 
 		// Apply purkinje shift

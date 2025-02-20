@@ -19,9 +19,9 @@ struct Weather {
 Weather get_weather() {
 	Weather weather;
 
-	const float temperature_variation_speed = golden_ratio * rcp(600.0) * 1.0;
-	const float humidity_variation_speed    = golden_ratio * rcp(600.0) * 1.5;
-	const float wind_variation_speed        = golden_ratio * rcp(600.0) * 2.0;
+	const float temperature_variation_speed = golden_ratio * rcp(600.0) * WEATHER_TEMPERATURE_VARIATION_SPEED;
+	const float humidity_variation_speed    = golden_ratio * rcp(600.0) * WEATHER_HUMIDITY_VARIATION_SPEED;
+	const float wind_variation_speed        = golden_ratio * rcp(600.0) * WEATHER_WIND_VARIATION_SPEED;
 	const float random_temperature_min      = 0.0;
 	const float random_temperature_max      = 1.0;
 	const float random_humidity_min         = 0.2;
@@ -31,7 +31,7 @@ Weather get_weather() {
 	const float biome_temperature_influence = 0.1;
 	const float biome_humidity_influence    = 0.1;
 
-	// Random weather variation
+#ifdef RANDOM_WEATHER_VARIATION
 	weather.temperature = mix(
 		random_temperature_min,
 		random_temperature_max,
@@ -40,35 +40,46 @@ Weather get_weather() {
 	weather.humidity = mix(
 		random_humidity_min,
 		random_humidity_max,
-		noise_1d(world_age * humidity_variation_speed)
+		noise_1d(world_age * humidity_variation_speed + 41.618)
 	);
 	weather.wind = mix(
 		random_wind_min,
 		random_wind_max,
-		noise_1d(world_age * wind_variation_speed)
+		noise_1d(world_age * wind_variation_speed + 83.236)
 	);
 
 	// Time-of-day-based variation 
 	weather.temperature -= 0.2 * time_sunrise + 0.2 * time_midnight;
+#endif
 
-	// Biome-based variation 
-	//weather.temperature += biome_temperature * biome_temperature_influence;
-	//weather.humidity += biome_humidity * biome_humidity_influence;
+#ifdef BIOME_WEATHER_VARIATION
+	weather.temperature += (biome_temperature - 0.6) * biome_temperature_influence;
+	weather.humidity += (biome_humidity + 0.2) * biome_humidity_influence;
+#endif
 
 	// Weather-based variation
 	weather.humidity += wetness;
 	weather.wind += 0.33 * wetness;
 
+	// User adjustment 
+	weather.temperature += WEATHER_TEMPERATURE_BIAS;
+	weather.humidity += WEATHER_HUMIDITY_BIAS;
+	weather.wind += WEATHER_WIND_BIAS;
+
 	// Saturate 
 	weather.temperature = clamp01(weather.temperature);
-	weather.humidity    = clamp01(weather.humidity);
-	weather.wind        = clamp01(weather.wind);
+	weather.humidity = clamp01(weather.humidity);
+	weather.wind = clamp01(weather.wind);
 
 	return weather;
 }
 
 float clouds_cumulus_congestus_blend(Weather weather) {
-	return linear_step(0.4, 0.6, weather.temperature * weather.wind);
+	float temperature_weight = linear_step(0.33, 1.0, weather.temperature);
+	float humidity_weight = linear_step(0.1, 0.9, weather.humidity);
+	float wind_weight = weather.wind;
+
+	return dampen(temperature_weight * humidity_weight) * wind_weight;
 }
 
 float clouds_l0_cumulus_stratus_blend(Weather weather) {
@@ -86,8 +97,7 @@ vec2 clouds_l0_coverage(Weather weather, float cumulus_congestus_blend) {
 	float stratus_sheet = sqr(clouds_l0_cumulus_stratus_blend(weather));
 	vec2 local_variation = vec2(0.0, 1.0) * (0.2 + 0.2 * weather.wind) * (1.0 + 0.2 * stratus_sheet);
 
-	return clamp01(temperature_weight * humidity_weight + local_variation + 0.3 * stratus_sheet) 
-		* clamp01(1.0 - 2.0 * cumulus_congestus_blend);
+	return clamp01(temperature_weight * humidity_weight + local_variation + 0.3 * stratus_sheet);
 }
 
 vec2 clouds_l0_detail_weights(Weather weather, float cumulus_stratus_blend) {
@@ -96,8 +106,17 @@ vec2 clouds_l0_detail_weights(Weather weather, float cumulus_stratus_blend) {
 	return mix(
 		vec2(0.33, 0.40) * (1.0 + 0.5 * wind_torn_factor), 
 		vec2(0.07, 0.10),
-		sqr(cumulus_stratus_blend)
+		vec2(sqr(cumulus_stratus_blend), cumulus_stratus_blend)
 	) * CLOUDS_CUMULUS_DETAIL_STRENGTH;
+}
+
+vec2 clouds_l0_edge_sharpening(Weather weather, float cumulus_stratus_blend) {
+	return mix(vec2(3.0, 8.0), vec2(1.0, 2.0), sqr(cumulus_stratus_blend));
+}
+
+float clouds_l0_altitude_scale(Weather weather, vec2 coverage) {
+	float dynamic_thickness = mix(0.5, 1.0, smoothstep(0.4, 0.6, dot(coverage, vec2(0.25, 0.75))));
+	return 0.8 * rcp(dynamic_thickness * clouds_cumulus_thickness);
 }
 
 float clouds_l1_cumulus_stratus_blend(Weather weather) {
@@ -109,7 +128,7 @@ float clouds_l1_cumulus_stratus_blend(Weather weather) {
 vec2 clouds_l1_coverage(Weather weather, float cumulus_stratus_blend) {
 	// Altocumulus: high temperature, high humidity, not too high temperature
 	vec2 coverage_ac = weather.humidity * linear_step(0.25, 0.75, weather.wind) 
-		* dampen(linear_step(0.5, 1.0, weather.temperature) 
+		* dampen(linear_step(0.25, 1.0, weather.temperature) 
 		* linear_step(0.0, 0.1, 1.0 - weather.temperature)) * vec2(0.5, 1.5);
 
 	// Altostratus: high wind, high humidity
@@ -147,9 +166,13 @@ CloudsParameters get_clouds_parameters(Weather weather) {
 
 	params.cumulus_congestus_blend  = clouds_cumulus_congestus_blend(weather);
 
+
 	// Volumetric layer 0 - cumulus/stratocumulus/stratus
-	params.l0_coverage              = clouds_l0_coverage(weather, params.cumulus_congestus_blend);
 	params.l0_cumulus_stratus_blend = clouds_l0_cumulus_stratus_blend(weather);
+	params.l0_coverage              = clouds_l0_coverage(weather, params.cumulus_congestus_blend);
+	params.l0_detail_weights        = clouds_l0_detail_weights(weather, params.l0_cumulus_stratus_blend);
+	params.l0_edge_sharpening       = clouds_l0_edge_sharpening(weather, params.l0_cumulus_stratus_blend);
+	params.l0_altitude_scale        = clouds_l0_altitude_scale(weather, params.l0_coverage);
 
 	// Volumetric layer 1 - altocumulus/altostratus/undulatus
 	params.l1_cumulus_stratus_blend = clouds_l1_cumulus_stratus_blend(weather);
@@ -174,12 +197,6 @@ CloudsParameters get_clouds_parameters(Weather weather) {
 	// Crepuscular rays
 
 	params.crepuscular_rays_amount = cube(linear_step(0.4, 0.75, dot(params.l0_coverage, vec2(0.25, 0.75))));
-
-	float dynamic_thickness = mix(0.5, 1.0, smoothstep(0.4, 0.6, dot(params.l0_coverage, vec2(0.25, 0.75))));
-	params.l0_altitude_scale = 0.8 * rcp(dynamic_thickness * clouds_cumulus_thickness);
-
-	params.l0_detail_weights = clouds_l0_detail_weights(weather, params.l0_cumulus_stratus_blend);
-	params.l0_edge_sharpening = mix(vec2(3.0, 8.0), vec2(1.0, 2.0), sqr(params.l0_cumulus_stratus_blend));
 
 	return params;
 }

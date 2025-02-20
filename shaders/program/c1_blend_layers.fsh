@@ -111,14 +111,20 @@ uniform float time_noon;
 uniform float time_sunset;
 uniform float time_midnight;
 
+/*
+const bool colortex11MipmapEnabled = true;
+*/
+
 // ------------
 //   Includes
 // ------------
 
+#define SSRT_DH
 #define TEMPORAL_REPROJECTION
 
 #include "/include/fog/simple_fog.glsl"
 #include "/include/misc/distant_horizons.glsl"
+#include "/include/misc/lightning_flash.glsl"
 #include "/include/misc/material_masks.glsl"
 #include "/include/utility/color.glsl"
 #include "/include/utility/encoding.glsl"
@@ -173,15 +179,21 @@ vec4 smooth_filter(sampler2D sampler, vec2 coord) {
 	return texture(sampler, coord);
 }
 
-vec4 read_clouds(out float apparent_distance) {
+vec4 read_clouds_and_aurora(vec2 uv, out float apparent_distance) {
 #if defined WORLD_OVERWORLD
 	// Soften clouds for new pixels
-	float pixel_age = texelFetch(colortex12, ivec2(gl_FragCoord.xy), 0).y;
-	int ld = int(3.0 * dampen(max0(1.0 - 0.1 * pixel_age)));
+	float pixel_age = texelFetch(colortex12, ivec2(uv * view_res * taau_render_scale), 0).y;
+	float ld = 2.0 * dampen(max0(1.0 - 0.1 * pixel_age));
 
 	apparent_distance = min_of(textureGather(colortex12, uv * taau_render_scale, 0));
+	vec4 result = textureLod(colortex11, uv * taau_render_scale, ld);
 
-	return bicubic_filter_lod(colortex11, uv * taau_render_scale, ld);
+	if (LIGHTNING_FLASH_UNIFORM > 0.01) {
+		float ambient_scattering = texture(colortex12, uv * taau_render_scale).z;
+		result.xyz += LIGHTNING_FLASH_UNIFORM * lightning_flash_intensity * ambient_scattering;
+	}
+
+	return result;
 #else
 	return vec4(0.0, 0.0, 0.0, 1.0);
 #endif
@@ -260,6 +272,15 @@ void main() {
 
 	fragment_color = texture(colortex0, refracted_uv * taau_render_scale).rgb;
 
+	// Blend clouds behind translucents
+
+	float clouds_apparent_distance;
+	vec4 clouds_and_aurora = read_clouds_and_aurora(refracted_uv, clouds_apparent_distance);
+
+	if (is_sky || sqr(clouds_apparent_distance) < length_squared(back_position_view)) {
+		fragment_color = fragment_color * clouds_and_aurora.w + clouds_and_aurora.xyz;
+	}
+
 	// Draw DH water
 
 #ifdef DISTANT_HORIZONS
@@ -337,11 +358,8 @@ void main() {
 	// Blend clouds in front of translucents
 
 	if (is_translucent || is_dh_translucent) {
-		float clouds_dist;
-		vec4 clouds = read_clouds(clouds_dist);
-
-		if (clouds_dist < view_distance) {
-			fragment_color = fragment_color * clouds.w + clouds.xyz;
+		if (clouds_apparent_distance < view_distance) {
+			fragment_color = fragment_color * clouds_and_aurora.w + clouds_and_aurora.xyz;
 		}
 	}
 
